@@ -1,0 +1,165 @@
+Resources: >
+    Course 2 Final project - Server
+
+Parameters:
+    EnvironmentName:
+        Description: Environement name
+        Type: String
+
+Resources:
+    RoleForS3ReadAccess: 
+        Type: "AWS::IAM::Role"
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                    -   Effect: Allow
+                        Principal:
+                            Service:
+                                -   ec2.amazonaws.com
+                        Action:
+                            -   'sts:AssumeRole'
+            ManagedPolicyArns:
+                -   arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+    ServerInstanceProfile: 
+        Type: "AWS::IAM::InstanceProfile"
+        Properties: 
+          Roles: 
+            - !Ref RoleForS3ReadAccess
+    LBSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties: 
+            VpcId: 
+                Fn::ImportValue: !Sub ${EnvironmentName}-VPCID
+            GroupDescription: Load Balancer Security Group
+            SecurityGroupIngress: 
+                -   CidrIp: 0.0.0.0/0
+                    FromPort: 80
+                    IpProtocol: tcp
+                    ToPort: 80
+            SecurityGroupEgress: 
+                -   CidrIp: 0.0.0.0/0
+                    FromPort: 80
+                    IpProtocol: tcp
+                    ToPort: 80
+            Tags: 
+                - Key: Name 
+                  Value: !Sub ${EnvironmentName} LB SecurityGroup
+
+    WebServerSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties: 
+            VpcId: 
+                Fn::ImportValue: !Sub ${EnvironmentName}-VPCID
+            GroupDescription: Web Server Security Group
+            SecurityGroupIngress: 
+                -   CidrIp: 0.0.0.0/0
+                    FromPort: 80
+                    IpProtocol: tcp
+                    ToPort: 80
+                -   CidrIp: 0.0.0.0/0
+                    FromPort: 22
+                    IpProtocol: tcp
+                    ToPort: 22
+            SecurityGroupEgress: 
+                -   CidrIp: 0.0.0.0/0
+                    FromPort: 0
+                    IpProtocol: tcp
+                    ToPort: 65535
+            Tags: 
+                - Key: Name 
+                  Value: !Sub ${EnvironmentName} Web Server SecurityGroup
+
+    LaunchConfiguration:
+        Type: AWS::AutoScaling::LaunchConfiguration
+        Properties:
+            IamInstanceProfile: !Ref ServerInstanceProfile
+            SecurityGroups:
+                -   !Ref WebServerSecurityGroup
+            UserData: 
+                Fn::Base64: !Sub |
+                    #!/bin/bash
+                    sudo yum update -y
+                    sudo yum install -y httpd.x86_64
+                    sudo systemctl start httpd.service
+                    sudo systemctl enable httpd.service
+                    cd /var/www/html
+                    aws s3 cp s3://udacity-demo-1/udacity.zip .
+                    unzip -o udacity.zip
+            ImageId: ami-0d5eff06f840b45e9
+            InstanceType: t2.micro
+            BlockDeviceMappings:
+                - DeviceName: "/dev/xvda"
+                  Ebs:
+                    VolumeSize: 10
+
+    AutoScalingGroup:
+        Type: AWS::AutoScaling::AutoScalingGroup
+        Properties:
+            VPCZoneIdentifier:
+                -   Fn::ImportValue: !Sub ${EnvironmentName}-PV-SUB-NETS
+            LaunchConfigurationName: !Ref LaunchConfiguration
+            MinSize: 4
+            MaxSize: 5
+            TargetGroupARNs: 
+                -   !Ref WebAppTargetGroup
+            Tags:
+                -   Key: Name
+                    PropagateAtLaunch: true
+                    Value: !Sub ${EnvironmentName} Auto Scaling Group
+
+    LoadBalancer:
+        Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+        Properties: 
+            SecurityGroups: 
+                - !Ref LBSecurityGroup
+            Subnets: 
+                - Fn::ImportValue: !Sub ${EnvironmentName}-PB-SUB-NET1
+                - Fn::ImportValue: !Sub ${EnvironmentName}-PB-SUB-NET2
+            Tags: 
+                - Key: Name
+                  Value: !Sub ${EnvironmentName} Load Balancer
+
+    Listener:
+        Type: AWS::ElasticLoadBalancingV2::Listener
+        Properties:
+            DefaultActions:
+                -   Type: forward
+                    TargetGroupArn: !Ref WebAppTargetGroup
+            LoadBalancerArn: !Ref LoadBalancer
+            Port: 80
+            Protocol: HTTP
+
+    ALBListenerRule:
+        Type: AWS::ElasticLoadBalancingV2::ListenerRule
+        Properties:
+            Actions:
+                -   Type: forward
+                    TargetGroupArn: !Ref WebAppTargetGroup
+            Conditions:
+                -   Field: path-pattern
+                    Values: [/]
+            ListenerArn: !Ref Listener
+            Priority: 1               
+            
+    WebAppTargetGroup:
+        Type: AWS::ElasticLoadBalancingV2::TargetGroup
+        Properties:
+            HealthCheckIntervalSeconds: 10
+            HealthCheckPath: /
+            HealthCheckProtocol: HTTP
+            HealthCheckTimeoutSeconds: 8
+            HealthyThresholdCount: 2
+            Port: 80
+            Protocol: HTTP
+            UnhealthyThresholdCount: 5
+            VpcId: 
+                Fn::ImportValue: !Sub ${EnvironmentName}-VPCID
+
+Outputs:
+    LoadBalancerDNS:
+        Description: Load Balancer DNS
+        Value: !Join ['', ['http://', !GetAtt LoadBalancer.DNSName]]
+
+
+
